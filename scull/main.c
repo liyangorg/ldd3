@@ -240,6 +240,11 @@ int scull_open(struct inode *inode, struct file *filp)
 {
 	struct scull_dev *dev; /* device information */
 
+	/*
+	cast a member of a structure out to the containing structure.
+	inode->i_cdev为cdev类型变量，这个变量是scull_dev的成员变量。
+	从结构体scull_dev的成员变量来获取该结构体的地址	 
+	*/
 	dev = container_of(inode->i_cdev, struct scull_dev, cdev);
 	filp->private_data = dev; /* for other methods */
 
@@ -259,6 +264,7 @@ int scull_release(struct inode *inode, struct file *filp)
 }
 /*
  * Follow the list
+ * Warn: 只申请了scull_qset的空间，即**data, *next,没有量子空间啊？？
  */
 struct scull_qset *scull_follow(struct scull_dev *dev, int n)
 {
@@ -305,12 +311,13 @@ ssize_t scull_read(struct file *filp, char __user *buf, size_t count,
 	if (*f_pos >= dev->size)
 		goto out;
 	if (*f_pos + count > dev->size)
-		count = dev->size - *f_pos;
+		count = dev->size - *f_pos;//是否需要给用户以提示：count过大。而不是直接默认处理
 
 	/* find listitem, qset index, and offset in the quantum */
 	item = (long)*f_pos / itemsize;
 	rest = (long)*f_pos % itemsize;
-	s_pos = rest / quantum; q_pos = rest % quantum;
+	s_pos = rest / quantum;//定位量子集
+	q_pos = rest % quantum;//定位量子
 
 	/* follow the list up to the right position (defined elsewhere) */
 	dptr = scull_follow(dev, item);
@@ -548,6 +555,7 @@ loff_t scull_llseek(struct file *filp, loff_t off, int whence)
 
 
 
+//一组驱动程序操作，主要用来实现系统调用
 struct file_operations scull_fops = {
 	.owner =    THIS_MODULE,
 	.llseek =   scull_llseek,
@@ -600,35 +608,54 @@ void scull_cleanup_module(void)
  */
 static void scull_setup_cdev(struct scull_dev *dev, int index)
 {
+	//神写法：误以为是python类似语法：返回两个数值。
+	//其实：声明err变量，定义并初始化devno变量
 	int err, devno = MKDEV(scull_major, scull_minor + index);
     
+    	//初始化dev->cdev:
+	/*
+	void cdev_init(struct cdev *cdev, const struct file_operations *fops)
+	{
+		memset(cdev, 0, sizeof *cdev);
+		INIT_LIST_HEAD(&cdev->list);
+		kobject_init(&cdev->kobj, &ktype_cdev_default);
+		cdev->ops = fops;
+	}
+	*/
 	cdev_init(&dev->cdev, &scull_fops);
 	dev->cdev.owner = THIS_MODULE;
 	dev->cdev.ops = &scull_fops;
-	err = cdev_add (&dev->cdev, devno, 1);
+	err = cdev_add (&dev->cdev, devno, 1);//使用devno、1填充cdev，告诉内核该结构的信息：kobj_
 	/* Fail gracefully if need be */
 	if (err)
 		printk(KERN_NOTICE "Error %d adding scull%d", err, index);
 }
 
 
+//字符设备注册
 int scull_init_module(void)
 {
 	int result, i;
-	dev_t dev = 0;
+	dev_t dev = 0; //dev_t为32位的数,其中12位表示主设备号，剩余20位表示次设备号。
 
 /*
  * Get a range of minor numbers to work with, asking for a dynamic
  * major unless directed otherwise at load time.
  */
+ 	//默认值为0。当然，模块调用者可以传入参数来指定主设备号
 	if (scull_major) {
-		dev = MKDEV(scull_major, scull_minor);
+		dev = MKDEV(scull_major, scull_minor); //将主设备号和次设备号转换为dev_t,
+		 //申请次设备号(scull_minor ~ scull_minor+scull_nr_devs),
+		 //主设备号已通过模块参数指定
 		result = register_chrdev_region(dev, scull_nr_devs, "scull");
 	} else {
+		//内核分配主设备号，存储到dev
 		result = alloc_chrdev_region(&dev, scull_minor, scull_nr_devs,
 				"scull");
-		scull_major = MAJOR(dev);
+		scull_major = MAJOR(dev);//保存内核申请的主设备号，以备后用
 	}
+	//执行失败，会返回一个负的错误码，所以这里的输出日志只是简单的说明无法获取主设备号，
+	//可能造成误解。*****************
 	if (result < 0) {
 		printk(KERN_WARNING "scull: can't get major %d\n", scull_major);
 		return result;
@@ -638,6 +665,7 @@ int scull_init_module(void)
 	 * allocate the devices -- we can't have them static, as the number
 	 * can be specified at load time
 	 */
+	 //scrull设备，可以视为一段可读写的内存。所以申请内存，即为创建设备
 	scull_devices = kmalloc(scull_nr_devs * sizeof(struct scull_dev), GFP_KERNEL);
 	if (!scull_devices) {
 		result = -ENOMEM;
@@ -650,7 +678,7 @@ int scull_init_module(void)
 		scull_devices[i].quantum = scull_quantum;
 		scull_devices[i].qset = scull_qset;
 		sema_init(&scull_devices[i].sem, 1);
-		scull_setup_cdev(&scull_devices[i], i);
+		scull_setup_cdev(&scull_devices[i], i);//cdev_init,cdev_add. 注册Scull设备
 	}
 
         /* At this point call the init function for any friend device */
